@@ -1,7 +1,11 @@
 import streamlit as st
 import requests
+import os
+from dotenv import load_dotenv
 
-API_BASE_URL = "http://localhost:8000"
+load_dotenv()
+
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:7860")
 
 st.set_page_config(
     page_title="RAG Document Q&A",
@@ -51,19 +55,28 @@ st.markdown("""
         margin: 8px 0;
         font-weight: bold;
     }
+    .chat-container {
+        background-color: #f8fafc;
+        border-radius: 8px;
+        padding: 15px;
+        margin-bottom: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
 def check_api_health():
+    """Check if backend API is running"""
     try:
         r = requests.get(f"{API_BASE_URL}/health", timeout=5)
         return r.json() if r.status_code == 200 else None
-    except Exception:
+    except Exception as e:
+        st.sidebar.error(f"Cannot connect to API: {str(e)}")
         return None
 
 
 def upload_pdf(file):
+    """Upload PDF to backend"""
     try:
         files = {
             "file": (file.name, file.getvalue(), "application/pdf")
@@ -75,12 +88,13 @@ def upload_pdf(file):
         )
         if r.status_code == 200:
             return {"success": True, "data": r.json()}
-        return {"success": False, "error": r.json().get("detail")}
+        return {"success": False, "error": r.json().get("detail", "Unknown error")}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
 def query_api(question: str, top_k: int = 5):
+    """Send query to backend"""
     try:
         r = requests.post(
             f"{API_BASE_URL}/query",
@@ -93,12 +107,13 @@ def query_api(question: str, top_k: int = 5):
         )
         if r.status_code == 200:
             return {"success": True, "data": r.json()}
-        return {"success": False, "error": r.json().get("detail")}
+        return {"success": False, "error": r.json().get("detail", "Unknown error")}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
 def reset_system():
+    """Reset the system"""
     try:
         r = requests.get(f"{API_BASE_URL}/reset", timeout=30)
         return r.status_code == 200
@@ -107,11 +122,16 @@ def reset_system():
 
 
 def get_uploaded_files():
+    """Get list of uploaded files"""
     try:
-        r = requests.get(f"{API_BASE_URL}/files", timeout=5)
-        return r.json().get("files", []) if r.status_code == 200 else []
+        r = requests.get(f"{API_BASE_URL}/documents", timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            return [doc['filename'] for doc in data.get("documents", [])]
+        return []
     except Exception:
         return []
+
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -132,7 +152,8 @@ with st.sidebar:
             '<span class="status-ready">✅ API Connected</span>',
             unsafe_allow_html=True
         )
-        if health.get("vectorstore_ready"):
+        files = get_uploaded_files()
+        if files and len(files) > 0:
             st.markdown(
                 '<span class="status-ready">✅ Documents Ready</span>',
                 unsafe_allow_html=True
@@ -150,17 +171,16 @@ with st.sidebar:
             unsafe_allow_html=True
         )
         st.error(
-            "Backend not running!\n\n"
-            "Open CMD and run:\n"
-            "`python -m app.main`"
+            "⚠️ **Backend not running!**\n\n"
+            "Open Terminal and run:\n"
+            "```bash\npython main.py\n```"
         )
 
     st.markdown("---")
 
-    st.markdown("### 📄 Upload Any PDF")
-    st.markdown(
-        "**Step 1:** Select your PDF file below"
-    )
+ 
+    st.markdown("### 📄 Upload PDF")
+    st.markdown("**Step 1:** Select your PDF file")
 
     uploaded_file = st.file_uploader(
         "Choose any PDF file",
@@ -193,7 +213,7 @@ with st.sidebar:
             type="primary"
         )
 
-        if process_clicked:
+        if process_clicked and health:
             progress_bar = st.progress(0)
             status_text = st.empty()
 
@@ -215,10 +235,10 @@ with st.sidebar:
 
                 st.success(
                     f"🎉 **Successfully Processed!**\n\n"
-                    f"📄 File: {data['filename']}\n\n"
-                    f"📑 Pages: {data['pages']}\n\n"
-                    f"🧩 Chunks: {data['chunks']}\n\n"
-                    f"💾 Size: {data['file_size']}"
+                    f"📄 File: {data.get('filename', 'Unknown')}\n\n"
+                    f"📑 Pages: {data.get('pages', '?')}\n\n"
+                    f"🧩 Chunks: {data.get('chunks', '?')}\n\n"
+                    f"💾 Size: {data.get('size_bytes', '?')} bytes"
                 )
                 st.balloons()
                 st.session_state.documents_uploaded = True
@@ -232,6 +252,8 @@ with st.sidebar:
                     f"Error: {result['error']}\n\n"
                     "Try again or use a different PDF."
                 )
+        elif process_clicked and not health:
+            st.error("❌ Backend is not running. Start the backend first!")
 
     st.markdown("---")
 
@@ -239,10 +261,12 @@ with st.sidebar:
     if files:
         st.markdown("### 📂 Loaded Documents")
         for f in files:
-            st.markdown(f"✅ 📄 {f}")
+            st.markdown(f"✅ 📄 `{f}`")
         st.caption(
             f"{len(files)} document(s) ready for questions"
         )
+    else:
+        st.caption("No documents uploaded yet")
 
     st.markdown("---")
 
@@ -251,33 +275,49 @@ with st.sidebar:
         "Chunks to retrieve (top-k)",
         min_value=1,
         max_value=10,
-        value=5,
+        value=3,
         help="More chunks = more context but slower response"
+    )
+
+    temperature = st.slider(
+        "Response Temperature",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.0,
+        step=0.1,
+        help="0 = deterministic, 1 = creative"
     )
 
     st.markdown("---")
 
+
     st.markdown("### 🔄 Reset")
     st.caption("Clear all documents and start fresh")
-    if st.button(
-        "🗑️ Reset Everything",
-        use_container_width=True
-    ):
-        with st.spinner("Resetting system..."):
-            if reset_system():
-                st.session_state.messages = []
-                st.session_state.documents_uploaded = False
-                st.success("✅ Reset complete!")
-                st.rerun()
-            else:
-                st.error("❌ Reset failed!")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🗑️ Reset Chat", use_container_width=True):
+            st.session_state.messages = []
+            st.success("✅ Chat cleared!")
+            st.rerun()
+    
+    with col2:
+        if st.button("🔄 Reset All", use_container_width=True):
+            with st.spinner("Resetting system..."):
+                if reset_system():
+                    st.session_state.messages = []
+                    st.session_state.documents_uploaded = False
+                    st.success("✅ Reset complete!")
+                    st.rerun()
+                else:
+                    st.error("❌ Reset failed!")
 
     st.markdown("---")
+
     st.markdown("""
     ### ℹ️ About
-    **RAG Chatbot** v1.0
-
-    Works with ANY PDF:
+    **RAG Document Q&A Chatbot**
+    
+    **Works with ANY PDF:**
     - 📚 Textbooks
     - 📰 Research papers
     - 📋 Reports
@@ -285,14 +325,19 @@ with st.sidebar:
     - 📄 Resumes
     - And more!
 
-    Built with:
+    **Built with:**
     - 🦜 LangChain
     - 🔍 FAISS
     - ⚡ Groq LLaMA3
     - 🚀 FastAPI
     - 🎈 Streamlit
+    
+    **Author:** Mohammad Ayesha Summaiyya
+    
+    **GitHub:** [Ayesha037](https://github.com/Ayesha037)
     """)
- 
+
+
 st.markdown("""
 <div class="main-header">
     <h1>📚 RAG Document Q&A Chatbot</h1>
@@ -300,6 +345,17 @@ st.markdown("""
     Get accurate answers with source citations — powered by AI!</p>
 </div>
 """, unsafe_allow_html=True)
+
+
+health = check_api_health()
+if not health:
+    st.error(
+        "⚠️ **Backend API is not running!**\n\n"
+        "Please start the backend first:\n"
+        "```bash\npython main.py\n```"
+    )
+    st.stop()
+
 
 if not st.session_state.documents_uploaded:
     st.info(
@@ -331,6 +387,14 @@ if not st.session_state.documents_uploaded:
         """)
 
     st.markdown("---")
+    st.markdown("### 📋 Example Questions")
+    st.markdown("""
+    - What are the main topics covered?
+    - Summarize this document in 3 points
+    - What does chapter 2 discuss?
+    - Who is mentioned most frequently?
+    - What are the key findings?
+    """)
 
 else:
     files = get_uploaded_files()
@@ -340,7 +404,9 @@ else:
             f"Ask any question below."
         )
 
+
 st.markdown("### 💬 Chat")
+
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
@@ -352,14 +418,15 @@ for message in st.session_state.messages:
                     for cite in message["citations"]:
                         st.markdown(
                             f"""<div class="citation-box">
-                            📄 <b>{cite['source']}</b>
-                            — Page {cite['page']}<br>
+                            📄 <b>{cite.get('source', 'Unknown')}</b>
+                            — Page {cite.get('page', '?')}<br>
                             <i>{cite.get('preview', '')[:150]}</i>
                             </div>""",
                             unsafe_allow_html=True
                         )
             if message.get("model"):
-                st.caption(f"🤖 Powered by {message['model']}")
+                st.caption(f"🤖 {message['model']}")
+
 
 placeholder_text = (
     "Ask a question about your documents..."
@@ -377,6 +444,7 @@ if prompt := st.chat_input(
         "content": prompt
     })
 
+
     with st.chat_message("user"):
         st.markdown(prompt)
 
@@ -386,35 +454,46 @@ if prompt := st.chat_input(
 
         if result["success"]:
             data = result["data"]
-            answer = data["answer"]
+            answer = data.get("answer", "No answer generated")
 
             st.markdown(answer)
 
-            if data.get("citations"):
+
+            if data.get("sources"):
                 with st.expander("📎 View Sources"):
-                    for cite in data["citations"]:
+                    for idx, source in enumerate(data["sources"], 1):
                         st.markdown(
                             f"""<div class="citation-box">
-                            📄 <b>{cite['source']}</b>
-                            — Page {cite['page']}<br>
-                            <i>{cite.get('preview', '')[:150]}</i>
+                            📄 <b>Source {idx}</b>
+                            — Page {source.get('page', '?')}<br>
+                            <i>{source.get('content', '')[:150]}...</i>
                             </div>""",
                             unsafe_allow_html=True
                         )
 
-            st.caption(f"🤖 Powered by {data.get('model', '')}")
+            model_name = data.get("model", "LLaMA3")
+            st.caption(f"🤖 Powered by {model_name}")
 
+  
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": answer,
-                "citations": data.get("citations", []),
-                "model": data.get("model", "")
+                "citations": data.get("sources", []),
+                "model": model_name
             })
 
         else:
-            error = f"❌ Error: {result['error']}"
-            st.error(error)
+            error_msg = f"❌ Error: {result['error']}"
+            st.error(error_msg)
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": error
+                "content": error_msg
             })
+
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: gray; font-size: 12px;'>
+    <p>RAG Document Intelligence System | FastAPI + LangChain + Groq LLaMA3</p>
+    <p>By Mohammad Ayesha Summaiyya | <a href='https://github.com/Ayesha037'>GitHub</a></p>
+</div>
+""", unsafe_allow_html=True)
