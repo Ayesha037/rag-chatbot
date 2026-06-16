@@ -197,8 +197,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     global vector_store, qa_chain
     
     logger.info(f"📤 Uploading: {file.filename}")
-    
-    # Validate file type
+
     if not file.filename.endswith(".pdf"):
         logger.error(f"❌ Invalid file type: {file.filename}")
         raise HTTPException(
@@ -213,27 +212,37 @@ async def upload_pdf(file: UploadFile = File(...)):
             detail="Models not initialized. Check GROQ_API_KEY in .env file"
         )
     
+    tmp_path = None
     try:
-        # Read file
+        
         logger.info("Reading file...")
         contents = await file.read()
         file_size_bytes = len(contents)
         logger.info(f"File read: {file_size_bytes} bytes")
         
+        logger.info("Writing to temporary file...")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
             tmp_file.write(contents)
+            tmp_file.flush()  
             tmp_path = tmp_file.name
         
+        logger.info(f"Temp file created at: {tmp_path}")
+
         logger.info(f"Loading PDF: {file.filename}")
-        loader = PyPDFLoader(tmp_path)
-        documents = loader.load()
-        num_pages = len(documents)
+        try:
+            loader = PyPDFLoader(tmp_path)
+            documents = loader.load()
+            num_pages = len(documents)
+        except Exception as pdf_error:
+            logger.error(f"PDF Loading error: {str(pdf_error)}")
+            raise Exception(f"Failed to load PDF: {str(pdf_error)}")
         
         if num_pages == 0:
-            raise Exception("PDF has no pages!")
+            raise Exception("PDF has no pages or is corrupted!")
         
         logger.info(f"PDF loaded: {num_pages} pages")
         
+    
         logger.info("Splitting documents into chunks...")
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=int(os.getenv("CHUNK_SIZE", 1000)),
@@ -248,17 +257,29 @@ async def upload_pdf(file: UploadFile = File(...)):
         logger.info(f"Created {num_chunks} chunks")
         
         logger.info("Creating/updating vectorstore...")
-        if vector_store is None:
-            logger.info("Creating new vectorstore...")
-            vector_store = FAISS.from_documents(chunks, embeddings)
-        else:
-            logger.info("Adding to existing vectorstore...")
-            vector_store.add_documents(chunks)
+        try:
+            if vector_store is None:
+                logger.info("Creating new vectorstore...")
+                vector_store = FAISS.from_documents(chunks, embeddings)
+            else:
+                logger.info("Adding to existing vectorstore...")
+                vector_store.add_documents(chunks)
+        except Exception as faiss_error:
+            logger.error(f"FAISS error: {str(faiss_error)}")
+            raise Exception(f"Failed to create vectorstore: {str(faiss_error)}")
         
         logger.info(f"Saving vectorstore to {vectorstore_path}...")
-        vector_store.save_local(vectorstore_path)
+        try:
+ 
+            Path(vectorstore_path).parent.mkdir(parents=True, exist_ok=True)
+            vector_store.save_local(vectorstore_path)
+            logger.info("Vectorstore saved successfully")
+        except Exception as save_error:
+            logger.error(f"Error saving vectorstore: {str(save_error)}")
+            logger.warning("Continuing without saving (vectorstore in memory)")
         
-        setup_qa_chain()
+        if not setup_qa_chain():
+            logger.warning("QA chain setup failed, but continuing")
         
         uploaded_docs.append({
             "filename": file.filename,
@@ -266,8 +287,6 @@ async def upload_pdf(file: UploadFile = File(...)):
             "chunks": num_chunks,
             "pages": num_pages
         })
-        
-        os.unlink(tmp_path)
         
         logger.info(f"✅ Successfully processed {file.filename}")
         
@@ -282,11 +301,19 @@ async def upload_pdf(file: UploadFile = File(...)):
     
     except Exception as e:
         logger.error(f"❌ Error processing file: {str(e)}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=500,
             detail=f"Error processing file: {str(e)}"
         )
+    
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+                logger.info(f"Temp file cleaned up: {tmp_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"Could not clean up temp file: {str(cleanup_error)}")
 
 @app.post("/query")
 async def query(request: QueryRequest):
@@ -344,7 +371,6 @@ def reset_system():
     logger.info("🔄 Resetting system...")
     
     try:
-        # Clear vectorstore
         if os.path.exists(vectorstore_path):
             shutil.rmtree(vectorstore_path)
             logger.info("Vectorstore cleared")
