@@ -11,10 +11,8 @@ import traceback
 import shutil
 from pathlib import Path
 
-# Suppress deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -30,7 +28,6 @@ import tempfile
 
 load_dotenv()
 
-# ==================== CONFIG ====================
 app = FastAPI(
     title="RAG Document Intelligence System",
     description="Production RAG pipeline: PDF upload → FAISS vector search → LLaMA3 answer generation via Groq",
@@ -45,17 +42,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==================== GLOBAL STATE ====================
 vector_store = None
 qa_chain = None
 uploaded_docs = []
 vectorstore_path = "vectorstore/faiss_index"
 
-# Create directories
 Path("vectorstore").mkdir(exist_ok=True)
 Path("data").mkdir(exist_ok=True)
 
-# ==================== MODELS ====================
 class QueryRequest(BaseModel):
     question: str
     top_k: int = 3
@@ -66,7 +60,6 @@ class UploadResponse(BaseModel):
     size_bytes: int
     chunks: int
 
-# ==================== INITIALIZATION ====================
 logger.info("🚀 Initializing RAG system...")
 
 try:
@@ -95,7 +88,6 @@ except Exception as e:
     logger.error(f"❌ Error loading LLM: {str(e)}")
     llm = None
 
-# Load existing vectorstore if it exists
 def load_vectorstore():
     """Load existing vectorstore"""
     global vector_store
@@ -153,14 +145,12 @@ Answer:"""
         logger.error(f"Error setting up QA chain: {str(e)}")
         return False
 
-# Load on startup
 load_vectorstore()
 if vector_store:
     setup_qa_chain()
 
 logger.info("✅ RAG system initialized")
 
-# ==================== ENDPOINTS ====================
 
 @app.get("/")
 def root():
@@ -216,7 +206,6 @@ async def upload_pdf(file: UploadFile = File(...)):
             detail=f"Only PDF files accepted. Got: {file.filename}"
         )
     
-    # Check if models are loaded
     if embeddings is None or llm is None:
         logger.error("Models not loaded!")
         raise HTTPException(
@@ -231,13 +220,11 @@ async def upload_pdf(file: UploadFile = File(...)):
         file_size_bytes = len(contents)
         logger.info(f"File read: {file_size_bytes} bytes")
         
-        # Save temporarily
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
             tmp_file.write(contents)
             tmp_path = tmp_file.name
         
         logger.info(f"Loading PDF: {file.filename}")
-        # Load PDF
         loader = PyPDFLoader(tmp_path)
         documents = loader.load()
         num_pages = len(documents)
@@ -247,7 +234,6 @@ async def upload_pdf(file: UploadFile = File(...)):
         
         logger.info(f"PDF loaded: {num_pages} pages")
         
-        # Split documents
         logger.info("Splitting documents into chunks...")
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=int(os.getenv("CHUNK_SIZE", 1000)),
@@ -261,7 +247,6 @@ async def upload_pdf(file: UploadFile = File(...)):
         
         logger.info(f"Created {num_chunks} chunks")
         
-        # Create or update vectorstore
         logger.info("Creating/updating vectorstore...")
         if vector_store is None:
             logger.info("Creating new vectorstore...")
@@ -270,14 +255,11 @@ async def upload_pdf(file: UploadFile = File(...)):
             logger.info("Adding to existing vectorstore...")
             vector_store.add_documents(chunks)
         
-        # Save vectorstore
         logger.info(f"Saving vectorstore to {vectorstore_path}...")
         vector_store.save_local(vectorstore_path)
         
-        # Setup QA chain
         setup_qa_chain()
         
-        # Track document
         uploaded_docs.append({
             "filename": file.filename,
             "size_bytes": file_size_bytes,
@@ -285,7 +267,6 @@ async def upload_pdf(file: UploadFile = File(...)):
             "pages": num_pages
         })
         
-        # Clean up
         os.unlink(tmp_path)
         
         logger.info(f"✅ Successfully processed {file.filename}")
@@ -314,7 +295,6 @@ async def query(request: QueryRequest):
     
     logger.info(f"❓ Query: {request.question}")
     
-    # Check if qa_chain is ready
     if qa_chain is None or vector_store is None:
         logger.error("No documents uploaded yet")
         raise HTTPException(
@@ -323,7 +303,6 @@ async def query(request: QueryRequest):
         )
     
     try:
-        # Get answer
         logger.info("Processing query...")
         result = qa_chain({"query": request.question})
         
@@ -332,7 +311,6 @@ async def query(request: QueryRequest):
         
         logger.info(f"Got answer from {len(source_docs)} sources")
         
-        # Format sources
         sources = []
         for doc in source_docs[:request.top_k]:
             sources.append({
@@ -389,7 +367,6 @@ def reset_system():
             detail=f"Error resetting system: {str(e)}"
         )
 
-# ==================== ERROR HANDLERS ====================
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
@@ -408,7 +385,6 @@ async def general_exception_handler(request, exc):
         content={"error": "Internal server error"}
     )
 
-# ==================== MAIN ====================
 if __name__ == "__main__":
     import uvicorn
     
