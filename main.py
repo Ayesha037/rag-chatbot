@@ -1,29 +1,47 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
-import tempfile
-from pathlib import Path
+import shutil
 import logging
+import traceback
+import tempfile
+import warnings
+from pathlib import Path
+from typing import List
 
-# Logging
-logging.basicConfig(level=logging.INFO)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-# LangChain imports
-from langchain_community.document_loaders import PyMuPDFLoader
+from dotenv import load_dotenv
+load_dotenv()
+
+# ── LangChain imports ─────────────────────────────────────────────────────────
+from langchain_community.document_loaders import PyMuPDFLoader   # uses pymupdf, no extra dep
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_groq import ChatGroq
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 
-from dotenv import load_dotenv
-load_dotenv()
+# ── Paths ──────────────────────────────────────────────────────────────────────
+VECTORSTORE_PATH = os.getenv("VECTORSTORE_PATH", "vectorstore/faiss_index")
+Path("vectorstore").mkdir(exist_ok=True)
+Path("data").mkdir(exist_ok=True)
 
-# App init
-app = FastAPI(title="RAG API", version="1.0")
+# ── App ────────────────────────────────────────────────────────────────────────
+app = FastAPI(
+    title="RAG Document Intelligence System",
+    description="PDF upload → FAISS vector search → LLaMA3 answer generation via Groq",
+    version="2.0.0"
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,179 +51,319 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Globals
+# ── Global state ───────────────────────────────────────────────────────────────
 vector_store = None
 qa_chain = None
-uploaded_docs = []
+uploaded_docs: List[dict] = []
 
-# Request model
+# ── Pydantic models ────────────────────────────────────────────────────────────
 class QueryRequest(BaseModel):
     question: str
+    top_k: int = 3
 
-# ---------------------------
-# LOAD MODELS
-# ---------------------------
+# ── Model initialisation ───────────────────────────────────────────────────────
+logger.info("🚀 Initialising RAG system…")
+
 try:
-    logger.info("Loading embeddings...")
+    logger.info("Loading embeddings model (sentence-transformers/all-MiniLM-L6-v2)…")
     embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
+        model_name=os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
     )
-    logger.info("Embeddings loaded")
+    logger.info("✅ Embeddings model loaded")
 except Exception as e:
-    logger.error(f"Embedding error: {e}")
+    logger.error(f"❌ Embeddings failed: {e}")
     embeddings = None
 
 try:
-    groq_key = os.getenv("GROQ_API_KEY")
+    groq_key = os.getenv("GROQ_API_KEY", "").strip()
     if not groq_key:
-        raise Exception("Missing GROQ_API_KEY")
-
-    logger.info("Loading LLM...")
+        raise ValueError("GROQ_API_KEY is empty or missing in .env")
+    logger.info("Loading LLM (Groq)…")
     llm = ChatGroq(
+        temperature=0,
+        model_name=os.getenv("LLM_MODEL", "llama-3.1-8b-instant"),
         api_key=groq_key,
-        model_name="llama-3.1-8b-instant",
-        temperature=0
+        max_tokens=1024,
     )
-    logger.info("LLM loaded")
+    logger.info("✅ LLM loaded")
 except Exception as e:
-    logger.error(f"LLM error: {e}")
+    logger.error(f"❌ LLM failed: {e}")
     llm = None
 
-
-# ---------------------------
-# QA SETUP
-# ---------------------------
-def setup_chain():
-    global qa_chain
-
-    if not vector_store or not llm:
-        return False
-
-    prompt = PromptTemplate(
-        template="""
-Use the following context to answer the question.
+# ── Helpers ────────────────────────────────────────────────────────────────────
+PROMPT_TEMPLATE = """Use the following pieces of context to answer the question at the end.
+If the answer is not contained in the context, say "I don't know" — do NOT make up an answer.
 
 Context:
 {context}
 
-Question:
-{question}
+Question: {question}
 
-Answer:
-""",
-        input_variables=["context", "question"]
-    )
-
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=vector_store.as_retriever(search_kwargs={"k": 3}),
-        chain_type_kwargs={"prompt": prompt},
-        return_source_documents=True
-    )
-
-    return True
+Answer:"""
 
 
-# ---------------------------
-# ROUTES
-# ---------------------------
+def _build_qa_chain() -> bool:
+    global qa_chain
+    if vector_store is None or llm is None:
+        return False
+    try:
+        prompt = PromptTemplate(
+            template=PROMPT_TEMPLATE,
+            input_variables=["context", "question"],
+        )
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=vector_store.as_retriever(
+                search_kwargs={"k": int(os.getenv("TOP_K_RESULTS", 3))}
+            ),
+            chain_type_kwargs={"prompt": prompt},
+            return_source_documents=True,
+        )
+        logger.info("✅ QA chain ready")
+        return True
+    except Exception as e:
+        logger.error(f"QA chain error: {e}")
+        return False
+
+
+def _load_vectorstore() -> bool:
+    global vector_store
+    try:
+        if embeddings and os.path.exists(VECTORSTORE_PATH):
+            logger.info(f"Loading vectorstore from {VECTORSTORE_PATH}…")
+            vector_store = FAISS.load_local(
+                VECTORSTORE_PATH,
+                embeddings,
+                allow_dangerous_deserialization=True,
+            )
+            logger.info("✅ Vectorstore loaded")
+            return True
+    except Exception as e:
+        logger.warning(f"Could not load vectorstore: {e}")
+    return False
+
+
+# Load on startup
+_load_vectorstore()
+if vector_store:
+    _build_qa_chain()
+logger.info("✅ Startup complete")
+
+# ── Endpoints ──────────────────────────────────────────────────────────────────
+
 @app.get("/")
 def root():
-    return {"status": "running"}
+    return {
+        "app": "RAG Document Intelligence System",
+        "version": "2.0.0",
+        "status": "running",
+        "endpoints": {
+            "POST /upload": "Upload a PDF file",
+            "POST /query": "Ask a question about uploaded documents",
+            "GET  /health": "System health",
+            "GET  /documents": "List uploaded documents",
+            "GET  /reset": "Clear all documents",
+            "GET  /docs": "Swagger UI",
+        },
+    }
 
 
 @app.get("/health")
 def health():
     return {
-        "models_loaded": embeddings is not None and llm is not None,
-        "documents_loaded": vector_store is not None
+        "status": "running",
+        "embeddings_loaded": embeddings is not None,
+        "llm_loaded": llm is not None,
+        "vector_store": "ready" if vector_store else "empty",
+        "qa_chain": "ready" if qa_chain else "not_ready",
+        "documents_uploaded": len(uploaded_docs),
     }
 
 
+@app.get("/documents")
+def list_documents():
+    return {"count": len(uploaded_docs), "documents": uploaded_docs}
+
+
 @app.post("/upload")
-async def upload(file: UploadFile = File(...)):
-    global vector_store, uploaded_docs
+async def upload_pdf(file: UploadFile = File(...)):
+    """Upload and index a PDF document."""
+    global vector_store, qa_chain
 
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(400, "Only PDF allowed")
+    # ── Validations ────────────────────────────────────────────────────────────
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, f"Only PDF files are accepted. Got: {file.filename}")
 
+    if embeddings is None:
+        raise HTTPException(500, "Embeddings model not initialised. Check server logs.")
+
+    if llm is None:
+        raise HTTPException(
+            500,
+            "LLM not initialised. Ensure GROQ_API_KEY is set correctly in .env"
+        )
+
+    tmp_path = None
     try:
-        # Save temp file
+        # Save upload to a temp file
         contents = await file.read()
+        if len(contents) == 0:
+            raise HTTPException(400, "Uploaded file is empty.")
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(contents)
             tmp_path = tmp.name
 
-        logger.info(f"Processing: {file.filename}")
+        logger.info(f"📄 Processing '{file.filename}' ({len(contents)} bytes)…")
 
-        # Load PDF (uses pymupdf)
+        # Load PDF with PyMuPDF (no extra pypdf dep needed)
         loader = PyMuPDFLoader(tmp_path)
-        docs = loader.load()
+        documents = loader.load()
 
-        if not docs:
-            raise Exception("Empty PDF")
+        if not documents:
+            raise HTTPException(400, "PDF appears to be empty or unreadable.")
 
-        # Split
+        num_pages = len(documents)
+        logger.info(f"  Loaded {num_pages} page(s)")
+
+        # Chunk
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200
+            chunk_size=int(os.getenv("CHUNK_SIZE", 1000)),
+            chunk_overlap=int(os.getenv("CHUNK_OVERLAP", 200)),
         )
-        chunks = splitter.split_documents(docs)
+        chunks = splitter.split_documents(documents)
+        if not chunks:
+            raise HTTPException(400, "Could not extract any text from this PDF.")
 
-        # Vector store
-        vector_store = FAISS.from_documents(chunks, embeddings)
+        num_chunks = len(chunks)
+        logger.info(f"  Created {num_chunks} chunk(s)")
 
-        # Setup QA
-        setup_chain()
+        # Build / update vectorstore
+        if vector_store is None:
+            vector_store = FAISS.from_documents(chunks, embeddings)
+            logger.info("  Created new vectorstore")
+        else:
+            vector_store.add_documents(chunks)
+            logger.info("  Updated existing vectorstore")
 
-        uploaded_docs.append(file.filename)
+        vector_store.save_local(VECTORSTORE_PATH)
+        _build_qa_chain()
 
+        uploaded_docs.append({
+            "filename": file.filename,
+            "size_bytes": len(contents),
+            "pages": num_pages,
+            "chunks": num_chunks,
+        })
+
+        logger.info(f"✅ '{file.filename}' indexed successfully")
         return {
-            "message": "Uploaded successfully",
-            "pages": len(docs),
-            "chunks": len(chunks)
+            "message": f"'{file.filename}' uploaded and indexed successfully.",
+            "filename": file.filename,
+            "size_bytes": len(contents),
+            "pages": num_pages,
+            "chunks": num_chunks,
+            "total_documents": len(uploaded_docs),
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Upload error: {e}")
-        raise HTTPException(500, str(e))
-
+        logger.error(f"❌ Upload error: {e}\n{traceback.format_exc()}")
+        raise HTTPException(500, f"Error processing file: {str(e)}")
     finally:
-        if "tmp_path" in locals() and Path(tmp_path).exists():
-            Path(tmp_path).unlink()
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 @app.post("/query")
-async def query(req: QueryRequest):
-    if not qa_chain:
-        raise HTTPException(400, "Upload PDF first")
+async def query(request: QueryRequest):
+    """Ask a question about the uploaded documents."""
+    if not request.question.strip():
+        raise HTTPException(400, "Question cannot be empty.")
+
+    if qa_chain is None or vector_store is None:
+        raise HTTPException(
+            400,
+            "No documents have been indexed yet. Please upload a PDF first."
+        )
 
     try:
-        result = qa_chain({"query": req.question})
+        logger.info(f"❓ Query: {request.question}")
+        result = qa_chain({"query": request.question})
 
+        answer = result.get("result", "No answer generated.")
+        source_docs = result.get("source_documents", [])
+
+        sources = [
+            {
+                "content": doc.page_content[:300] + ("…" if len(doc.page_content) > 300 else ""),
+                "page": doc.metadata.get("page", "unknown"),
+                "source": doc.metadata.get("source", "unknown"),
+            }
+            for doc in source_docs[: request.top_k]
+        ]
+
+        logger.info(f"✅ Answer generated from {len(sources)} source(s)")
         return {
-            "answer": result["result"],
-            "sources": [
-                doc.page_content[:150]
-                for doc in result["source_documents"]
-            ]
+            "question": request.question,
+            "answer": answer,
+            "sources": sources,
+            "model": os.getenv("LLM_MODEL", "llama-3.1-8b-instant"),
+            "confidence": "high" if sources else "low",
         }
 
     except Exception as e:
-        logger.error(f"Query error: {e}")
-        raise HTTPException(500, str(e))
+        logger.error(f"❌ Query error: {e}\n{traceback.format_exc()}")
+        raise HTTPException(500, f"Error processing query: {str(e)}")
 
 
 @app.get("/reset")
-def reset():
+def reset_system():
+    """Clear all indexed documents and reset the system."""
     global vector_store, qa_chain, uploaded_docs
-    vector_store = None
-    qa_chain = None
-    uploaded_docs = []
-    return {"status": "reset"}
+
+    try:
+        if os.path.exists(VECTORSTORE_PATH):
+            shutil.rmtree(VECTORSTORE_PATH)
+
+        vector_store = None
+        qa_chain = None
+        uploaded_docs = []
+
+        logger.info("🔄 System reset complete")
+        return {"status": "reset", "message": "All documents cleared. Ready for new uploads."}
+
+    except Exception as e:
+        logger.error(f"Reset error: {e}")
+        raise HTTPException(500, f"Reset failed: {str(e)}")
+
+
+# ── Error handlers ─────────────────────────────────────────────────────────────
+
+@app.exception_handler(HTTPException)
+async def http_exc_handler(request, exc):
+    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+
+
+@app.exception_handler(Exception)
+async def general_exc_handler(request, exc):
+    logger.error(f"Unhandled error: {exc}")
+    return JSONResponse(status_code=500, content={"error": "Internal server error"})
+
+
+# ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=7860)
+
+    logger.info("=" * 60)
+    logger.info("🚀  RAG Document Intelligence System  v2.0")
+    logger.info("=" * 60)
+    logger.info("Backend  →  http://localhost:7860")
+    logger.info("Swagger  →  http://localhost:7860/docs")
+    logger.info("Frontend →  http://localhost:8501  (run app.py separately)")
+    logger.info("=" * 60)
+
+    uvicorn.run(app, host="0.0.0.0", port=7860, reload=False)

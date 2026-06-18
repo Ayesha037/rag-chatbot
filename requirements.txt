@@ -1,17 +1,27 @@
+# Web framework
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 python-multipart==0.0.9
+
+# LangChain
 langchain==0.3.1
 langchain-community==0.3.1
 langchain-groq==0.2.4
 langchain-text-splitters==0.3.8
+
+# Embeddings & vector store
 sentence-transformers==2.7.0
 faiss-cpu==1.8.0
+
+# PDF loading — PyMuPDF (replaces pypdf; already in your project)
 pymupdf==1.25.3
+
+# Data / config
 pydantic==2.9.2
 python-dotenv==1.0.1
+
+# Frontend
+streamlit==1.35.0
+
+# Logging
 loguru==0.7.2
-streamlit==1.40.0
-requests==2.32.3
-pillow==10.3.0
-pypdf==4.0.1

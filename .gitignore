@@ -1,11 +1,13 @@
 venv/
 __pycache__/
 *.pyc
+*.pyo
 .env
-.env.local
 *.egg-info/
 dist/
 build/
 .DS_Store
 vectorstore/
 data/
+.streamlit/
+ 
