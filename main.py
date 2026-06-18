@@ -9,7 +9,7 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -142,11 +142,15 @@ async def upload_pdf(file: UploadFile = File(...)):
             tmp.flush()
             tmp_path = tmp.name
         
-        logger.info(f"Processing PDF...")
+        logger.info(f"Processing PDF with PyMuPDF...")
         
-        # Load PDF
-        loader = PyPDFLoader(tmp_path)
-        documents = loader.load()
+        # Load PDF using PyMuPDFLoader (uses pymupdf which is in requirements)
+        try:
+            loader = PyMuPDFLoader(tmp_path)
+            documents = loader.load()
+        except Exception as pdf_error:
+            logger.error(f"PDF Loading error: {pdf_error}")
+            raise Exception(f"Failed to load PDF: {str(pdf_error)}")
         
         if not documents:
             raise Exception("PDF is empty")
