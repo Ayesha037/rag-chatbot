@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
 load_dotenv()
 
-# ── LangChain imports ─────────────────────────────────────────────────────────
 from langchain_community.document_loaders import PyMuPDFLoader   # uses pymupdf, no extra dep
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -31,12 +30,10 @@ from langchain_groq import ChatGroq
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 
-# ── Paths ──────────────────────────────────────────────────────────────────────
 VECTORSTORE_PATH = os.getenv("VECTORSTORE_PATH", "vectorstore/faiss_index")
 Path("vectorstore").mkdir(exist_ok=True)
 Path("data").mkdir(exist_ok=True)
 
-# ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="RAG Document Intelligence System",
     description="PDF upload → FAISS vector search → LLaMA3 answer generation via Groq",
@@ -51,17 +48,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Global state ───────────────────────────────────────────────────────────────
 vector_store = None
 qa_chain = None
 uploaded_docs: List[dict] = []
 
-# ── Pydantic models ────────────────────────────────────────────────────────────
 class QueryRequest(BaseModel):
     question: str
     top_k: int = 3
 
-# ── Model initialisation ───────────────────────────────────────────────────────
 logger.info("🚀 Initialising RAG system…")
 
 try:
@@ -90,7 +84,6 @@ except Exception as e:
     logger.error(f"❌ LLM failed: {e}")
     llm = None
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
 PROMPT_TEMPLATE = """Use the following pieces of context to answer the question at the end.
 If the answer is not contained in the context, say "I don't know" — do NOT make up an answer.
 
@@ -143,14 +136,10 @@ def _load_vectorstore() -> bool:
         logger.warning(f"Could not load vectorstore: {e}")
     return False
 
-
-# Load on startup
 _load_vectorstore()
 if vector_store:
     _build_qa_chain()
 logger.info("✅ Startup complete")
-
-# ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
@@ -191,7 +180,6 @@ async def upload_pdf(file: UploadFile = File(...)):
     """Upload and index a PDF document."""
     global vector_store, qa_chain
 
-    # ── Validations ────────────────────────────────────────────────────────────
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, f"Only PDF files are accepted. Got: {file.filename}")
 
@@ -217,7 +205,6 @@ async def upload_pdf(file: UploadFile = File(...)):
 
         logger.info(f"📄 Processing '{file.filename}' ({len(contents)} bytes)…")
 
-        # Load PDF with PyMuPDF (no extra pypdf dep needed)
         loader = PyMuPDFLoader(tmp_path)
         documents = loader.load()
 
@@ -239,7 +226,6 @@ async def upload_pdf(file: UploadFile = File(...)):
         num_chunks = len(chunks)
         logger.info(f"  Created {num_chunks} chunk(s)")
 
-        # Build / update vectorstore
         if vector_store is None:
             vector_store = FAISS.from_documents(chunks, embeddings)
             logger.info("  Created new vectorstore")
@@ -339,9 +325,6 @@ def reset_system():
         logger.error(f"Reset error: {e}")
         raise HTTPException(500, f"Reset failed: {str(e)}")
 
-
-# ── Error handlers ─────────────────────────────────────────────────────────────
-
 @app.exception_handler(HTTPException)
 async def http_exc_handler(request, exc):
     return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
@@ -352,8 +335,6 @@ async def general_exc_handler(request, exc):
     logger.error(f"Unhandled error: {exc}")
     return JSONResponse(status_code=500, content={"error": "Internal server error"})
 
-
-# ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
