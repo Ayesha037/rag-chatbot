@@ -1,9 +1,3 @@
-"""
-RAG Document Intelligence — All-in-one Streamlit app
-Starts FastAPI backend in a background thread, then runs Streamlit UI.
-Works on Streamlit Cloud, Railway, HuggingFace Spaces, or locally.
-"""
-
 import threading
 import time
 import os
@@ -17,17 +11,11 @@ from pathlib import Path
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
-
-# ── Load env ───────────────────────────────────────────────────────────────────
 from dotenv import load_dotenv
 load_dotenv()
-
-# ── RAG globals ────────────────────────────────────────────────────────────────
 VECTORSTORE_PATH = os.getenv("VECTORSTORE_PATH", "vectorstore/faiss_index")
 Path("vectorstore").mkdir(exist_ok=True)
 Path("data").mkdir(exist_ok=True)
-
-# ── Lazy-init models (shared across Streamlit reruns via st.cache_resource) ───
 import streamlit as st
 
 @st.cache_resource(show_spinner="Loading AI models… (first run only, ~30s)")
@@ -131,9 +119,6 @@ def process_pdf(file_bytes, filename, embeddings):
 
     finally:
         os.unlink(tmp_path)
-
-
-# ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="RAG Document Q&A",
     page_icon="📄",
@@ -153,24 +138,18 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
-
-# ── Session state ──────────────────────────────────────────────────────────────
 if "messages"     not in st.session_state: st.session_state.messages     = []
 if "vector_store" not in st.session_state: st.session_state.vector_store = None
 if "qa_chain"     not in st.session_state: st.session_state.qa_chain     = None
 if "uploaded_docs" not in st.session_state: st.session_state.uploaded_docs = []
-
-# ── Load models ────────────────────────────────────────────────────────────────
 embeddings, llm = load_models()
 
-# Load vectorstore from disk if exists and session is fresh
 if st.session_state.vector_store is None:
     vs = load_vectorstore(embeddings)
     if vs:
         st.session_state.vector_store = vs
         st.session_state.qa_chain = build_qa_chain(llm, vs)
 
-# ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 📄 RAG Document Q&A")
     st.markdown("---")
@@ -215,7 +194,6 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"❌ {str(e)}")
 
-    # Doc list
     if st.session_state.uploaded_docs:
         st.markdown("---")
         st.markdown(f"### 📚 Indexed ({len(st.session_state.uploaded_docs)})")
@@ -234,7 +212,6 @@ with st.sidebar:
     st.markdown("---")
     st.caption("FastAPI · LangChain · Groq LLaMA3 · FAISS\nBy [Mohammad Ayesha Summaiyya](https://github.com/Ayesha037)")
 
-# ── Main ───────────────────────────────────────────────────────────────────────
 st.markdown("<div class='main-header'>📄 RAG Document Intelligence</div>", unsafe_allow_html=True)
 st.markdown("<div class='sub-header'>Upload any PDF → ask questions → get source-attributed answers</div>", unsafe_allow_html=True)
 
